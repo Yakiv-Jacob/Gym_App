@@ -19,6 +19,10 @@ export const METRICS = {
   strength: [
     { id: 'maxWeight', label: 'Макс. вага', unit: 'кг', f: (s) => max(s.map((x) => x.weight)) },
     { id: 'e1rm', label: '1ПМ (оцінка)', unit: 'кг', f: (s) => max(s.map((x) => e1rm(x.weight, x.reps))) },
+    {
+      id: 'rel', label: '1ПМ ÷ вага тіла', ratio: true,
+      f: (s, w) => { const bw = bodyWeightAt(Date.parse(w.startedAt)); return bw ? max(s.map((x) => e1rm(x.weight, x.reps))) / bw : null; },
+    },
     { id: 'tonnage', label: 'Тоннаж', unit: 'кг', f: (s) => sum(s.map((x) => x.weight * x.reps)) },
     { id: 'sets', label: 'Підходи', int: true, f: (s) => s.length },
     { id: 'reps', label: 'Повторення', int: true, f: (s) => sum(s.map((x) => x.reps)) },
@@ -43,6 +47,7 @@ export const METRICS = {
 
 export function fmtMetric(m, v) {
   if (v == null) return '—';
+  if (m.ratio) return `${fmtNum(Math.round(v * 100) / 100)}×`;
   if (m.dur) return fmtDuration(v) + (m.perKm ? ' /км' : '');
   return fmtNum(Math.round(v * 10) / 10) + (m.unit ? ` ${m.unit}` : '');
 }
@@ -60,7 +65,7 @@ export function sessions(exerciseId) {
 export function series(exerciseId, metric, sinceMs = 0) {
   return sessions(exerciseId)
     .filter((s) => s.t >= sinceMs)
-    .map((s) => ({ t: s.t, v: metric.f(s.sets), wid: s.w.id }))
+    .map((s) => ({ t: s.t, v: metric.f(s.sets, s.w), wid: s.w.id }))
     .filter((p) => p.v != null && Number.isFinite(p.v));
 }
 
@@ -167,4 +172,118 @@ export function prFlags(workout, entry, type) {
     if (got.length) flags.set(s.id, got);
   }
   return flags;
+}
+
+// ---------- Регулярність ----------
+
+/** Понеділок (00:00 місцевого часу) тижня, до якого належить дата */
+export function weekStart(date = new Date()) {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return d;
+}
+
+/** Останні n тижнів: [{start: Date, v}], v = сума valueOf(workout) за тиждень */
+export function weeklyBuckets(n, valueOf) {
+  const cur = weekStart();
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const s = new Date(cur);
+    s.setDate(s.getDate() - 7 * i);
+    out.push({ start: s, v: 0 });
+  }
+  const idx = new Map(out.map((b, i) => [b.start.getTime(), i]));
+  for (const w of S.get().workouts) {
+    const i = idx.get(weekStart(new Date(w.startedAt)).getTime());
+    if (i != null) out[i].v += valueOf(w);
+  }
+  return out;
+}
+
+/** Серія тижнів поспіль, у кожному з яких було хоча б одне тренування */
+export function weekStreaks() {
+  const weeks = new Set(S.get().workouts.map((w) => weekStart(new Date(w.startedAt)).getTime()));
+  const cur = weekStart();
+  const thisWeek = weeks.has(cur.getTime());
+  let current = 0;
+  const d = new Date(cur);
+  if (!thisWeek) d.setDate(d.getDate() - 7); // поточний тиждень ще не закінчився — серія не перервана
+  while (weeks.has(d.getTime())) { current++; d.setDate(d.getDate() - 7); }
+  let best = 0, run = 0, prev = null;
+  for (const t of [...weeks].sort((a, b) => a - b)) {
+    if (prev != null) { const p = new Date(prev); p.setDate(p.getDate() + 7); run = p.getTime() === t ? run + 1 : 1; }
+    else run = 1;
+    best = Math.max(best, run);
+    prev = t;
+  }
+  return { current, best, thisWeek };
+}
+
+/** Кількість підходів по групах м'язів з дати sinceMs */
+export function groupSets(sinceMs) {
+  const m = new Map();
+  let none = 0;
+  for (const w of S.get().workouts) {
+    if (Date.parse(w.startedAt) < sinceMs) continue;
+    for (const e of w.entries) {
+      const x = S.exerciseById(e.exerciseId);
+      if (!x || !e.sets.length) continue;
+      const gs = x.muscleGroupIds.filter((id) => S.groupById(id));
+      if (!gs.length) none += e.sets.length;
+      for (const g of gs) m.set(g, (m.get(g) || 0) + e.sets.length);
+    }
+  }
+  const list = [...m].map(([id, v]) => ({ name: S.groupById(id).name, v })).sort((a, b) => b.v - a.v);
+  return { list, none };
+}
+
+// ---------- Кардіо ----------
+
+const isCardio = (e) => S.exerciseById(e.exerciseId)?.type === 'cardio';
+export const cardioDist = (w) => sum(w.entries.filter(isCardio).flatMap((e) => e.sets.map((s) => s.distance)));
+
+export function cardioTotals(sinceMs) {
+  let dist = 0, dur = 0;
+  const by = new Map();
+  for (const w of S.get().workouts) {
+    if (Date.parse(w.startedAt) < sinceMs) continue;
+    const seen = new Set();
+    for (const e of w.entries.filter(isCardio)) {
+      const d = sum(e.sets.map((s) => s.distance)), t = sum(e.sets.map((s) => s.duration));
+      dist += d; dur += t;
+      const r = by.get(e.exerciseId) || { name: S.exerciseById(e.exerciseId).name, dist: 0, dur: 0, count: 0 };
+      r.dist += d; r.dur += t;
+      if (!seen.has(e.exerciseId)) { r.count++; seen.add(e.exerciseId); }
+      by.set(e.exerciseId, r);
+    }
+  }
+  return { dist, dur, byEx: [...by.values()].sort((a, b) => b.dist - a.dist) };
+}
+
+// ---------- Вага тіла ----------
+
+const DAY = 864e5;
+export const dayMs = (key) => { const [y, m, d] = key.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
+export const bwSorted = () => S.get().bodyWeights.slice().sort((a, b) => a.date.localeCompare(b.date));
+
+/** Середнє записів за 7 днів, що закінчуються в момент t */
+export function bwAvg7(t) {
+  const win = S.get().bodyWeights.filter((b) => { const x = dayMs(b.date); return x <= t && x > t - 7 * DAY; });
+  return win.length ? sum(win.map((b) => b.weight)) / win.length : null;
+}
+
+/** Вага тіла на дату: останній запис не пізніше t, інакше найперший запис */
+export function bodyWeightAt(t) {
+  const list = bwSorted();
+  if (!list.length) return null;
+  let found = null;
+  for (const b of list) { if (dayMs(b.date) <= t) found = b; else break; }
+  return (found || list[0]).weight;
+}
+
+/** Точки для графіка: записи та 7-денне середнє (однакова довжина й порядок) */
+export function bwSeries(sinceMs) {
+  const all = bwSorted().map((b) => ({ t: dayMs(b.date), v: b.weight, id: b.id }));
+  const keep = all.filter((p) => p.t >= sinceMs);
+  return { pts: keep, avg: keep.map((p) => ({ t: p.t, v: bwAvg7(p.t + DAY / 2) })) };
 }

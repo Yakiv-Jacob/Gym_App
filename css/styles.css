@@ -193,6 +193,35 @@ button.tile:active { background: var(--surface-2); }
   background: none; border: 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums;
 }
 
+.seg {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; margin-bottom: 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 3px;
+}
+.seg button { border: 0; background: none; padding: 8px 4px; border-radius: 9px; font-weight: 600; color: var(--muted); }
+.seg button.on { background: var(--surface-2); color: var(--text); }
+.hint { margin: -4px 4px 12px; }
+.card .hint { margin: 10px 0 0; }
+
+.hbar { display: grid; grid-template-columns: minmax(0, 92px) 1fr 34px; align-items: center; gap: 10px; padding: 5px 0; font-size: 14px; }
+.hbar-l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hbar-track { height: 10px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.hbar-fill { display: block; height: 100%; background: #e8662f; border-radius: 0 4px 4px 0; }
+.hbar-fill.other { background: var(--muted); }
+.hbar-v { text-align: right; font-variant-numeric: tabular-nums; }
+
+.kv { display: flex; justify-content: space-between; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.kv:last-child { border-bottom: 0; }
+.goal-card { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin: 0 4px 4px; }
+.legend i { display: inline-block; vertical-align: middle; margin-right: 6px; }
+.lg-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.lg-line { width: 16px; height: 2px; background: #e8662f; }
+.lg-goal { width: 16px; border-top: 2px dashed var(--text); opacity: 0.7; }
+.chart .goal { stroke: var(--text); stroke-width: 1.5; stroke-dasharray: 5 4; opacity: 0.6; }
+.chart .raw { fill: var(--muted); }
+.chart .bar.dim { opacity: 0.45; }
+
 /* ---------- Шаблони ---------- */
 .tcard { display: flex; align-items: center; gap: 4px; padding: 0; }
 .tcard-main { flex: 1; min-width: 0; background: none; border: 0; text-align: left; padding: 14px; }

@@ -13,7 +13,10 @@ const TITLES = { workout: 'Тренування', history: 'Історія', sta
 const state = {
   tab: 'workout', detailId: null, exFilter: 'all',
   // Статистика: місяць календаря (перше число), вибраний день, вправа, показник, період, таблиця
-  stats: { month: null, day: null, exId: null, metric: null, period: '3m', table: false },
+  stats: {
+    view: 'overview', month: null, day: null, exId: null, metric: null, period: '3m', table: false,
+    grpPeriod: '1m', bwPeriod: '3m', bwAll: false,
+  },
 };
 
 /** data-атрибути з об'єкта */
@@ -40,7 +43,7 @@ function render() {
   titleEl.textContent = title;
   main.innerHTML = html;
   if (state.tab === 'more') fillStorageStatus();
-  if (state.tab === 'stats') drawChart();
+  if (state.tab === 'stats') drawStatsCharts();
 }
 
 // ---------- Форматування підходів ----------
@@ -281,6 +284,8 @@ function viewHistory() {
 
 const WEEKDAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'];
 const PERIODS = [['1m', '1 міс'], ['3m', '3 міс'], ['1y', 'Рік'], ['all', 'Все']];
+const STATS_VIEWS = [['overview', 'Загальне'], ['exercise', 'Вправи'], ['body', 'Тіло']];
+const CHART_COLOR = '#e8662f';
 
 function periodStart(p) {
   const d = new Date();
@@ -291,27 +296,49 @@ function periodStart(p) {
   return d.getTime();
 }
 
-function weekStart(date = new Date()) {
-  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-  return d;
-}
+const chipRow = (items, cur, action) => `<div class="chips scroll">${items.map(([id, label]) =>
+  `<button class="chip-btn ${id === cur ? 'on' : ''}" data-action="${action}" ${da({ v: id })}>${label}</button>`).join('')}</div>`;
+const chartBox = (id) => `<div class="chart-wrap"><div id="${id}" class="chart"></div><div class="chart-tip" hidden></div></div>`;
+const round1 = (v) => fmtNum(Math.round(v * 10) / 10);
+const signed = (v) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${round1(Math.abs(v))}`;
 
 function viewStats() {
-  const all = S.get().workouts;
-  if (!all.length) return '<p class="empty">Статистика з\'явиться після першого тренування.</p>';
-  const now = new Date();
+  const st = state.stats;
+  const seg = `<div class="seg">${STATS_VIEWS.map(([id, l]) =>
+    `<button class="${st.view === id ? 'on' : ''}" data-action="stats-view" ${da({ v: id })}>${l}</button>`).join('')}</div>`;
+  if (st.view === 'body') return seg + bodySection();
+  if (!S.get().workouts.length) return seg + '<p class="empty">Статистика з\'явиться після першого тренування.</p>';
+  return seg + (st.view === 'exercise' ? progressSection() : overviewSection());
+}
+
+// ----- Загальне -----
+
+function overviewSection() {
+  const all = S.get().workouts, now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-  const wk = weekStart(now).getTime();
   const count = (from) => all.filter((w) => Date.parse(w.startedAt) >= from).length;
+  const sk = ST.weekStreaks();
+  const avg = ST.weeklyBuckets(12, () => 1).reduce((a, b) => a + b.v, 0) / 12;
   return `
     <div class="tiles">
-      <div class="tile"><div class="tile-v">${count(wk)}</div><div class="tile-l">цього тижня</div></div>
+      <div class="tile"><div class="tile-v">${count(ST.weekStart(now).getTime())}</div><div class="tile-l">цього тижня</div></div>
       <div class="tile"><div class="tile-v">${count(monthStart)}</div><div class="tile-l">цього місяця</div></div>
       <div class="tile"><div class="tile-v">${all.length}</div><div class="tile-l">всього</div></div>
     </div>
     ${calendarSection()}
-    ${progressSection()}`;
+    <h2 class="section">Регулярність</h2>
+    <div class="tiles">
+      <div class="tile"><div class="tile-v">${sk.current}</div><div class="tile-l">${plural(sk.current, 'тиждень', 'тижні', 'тижнів')} поспіль</div></div>
+      <div class="tile"><div class="tile-v">${sk.best}</div><div class="tile-l">найдовша серія</div></div>
+      <div class="tile"><div class="tile-v">${round1(avg)}</div><div class="tile-l">трен. на тиждень</div></div>
+    </div>
+    ${sk.current && !sk.thisWeek ? '<p class="muted small hint">Цього тижня тренування ще не було — не перервіть серію 💪</p>' : ''}
+    <section class="card chart-card">
+      <div class="chart-title"><span class="strong">Тренувань на тиждень</span><span class="muted small">останні 12 тижнів</span></div>
+      ${chartBox('chart-freq')}
+    </section>
+    ${groupsSection()}
+    ${cardioSection()}`;
 }
 
 function calendarSection() {
@@ -352,6 +379,54 @@ function calendarSection() {
     ${dayList ? dayList.map(workoutCard).join('') : ''}`;
 }
 
+function groupsSection() {
+  const st = state.stats;
+  const { list, none } = ST.groupSets(periodStart(st.grpPeriod));
+  const rows = [...list];
+  if (none) rows.push({ name: 'Без групи', v: none, other: true });
+  const maxV = Math.max(1, ...rows.map((r) => r.v));
+  const body = rows.length
+    ? rows.map((r) => `
+        <div class="hbar">
+          <span class="hbar-l">${esc(r.name)}</span>
+          <span class="hbar-track"><span class="hbar-fill ${r.other ? 'other' : ''}" style="width:${((r.v / maxV) * 100).toFixed(1)}%"></span></span>
+          <span class="hbar-v">${r.v}</span>
+        </div>`).join('')
+    : '<p class="muted small">Немає підходів за цей період.</p>';
+  return `
+    <h2 class="section">Підходи за групами м'язів</h2>
+    ${chipRow(PERIODS.slice(0, 3), st.grpPeriod, 'grp-period')}
+    <section class="card">${body}
+      ${none ? '<p class="muted small hint">«Без групи» — вправи без вказаної групи м\'язів. Групу можна додати у вкладці «Вправи».</p>' : ''}
+    </section>`;
+}
+
+function cardioSection() {
+  const usage = S.exerciseUsage();
+  if (!S.get().exercises.some((x) => x.type === 'cardio' && usage.has(x.id))) return '';
+  const now = new Date();
+  const tw = ST.cardioTotals(ST.weekStart(now).getTime());
+  const tm = ST.cardioTotals(new Date(now.getFullYear(), now.getMonth(), 1).getTime());
+  const ty = ST.cardioTotals(new Date(now.getFullYear(), 0, 1).getTime());
+  const rows = tm.byEx.map((r) => `
+      <div class="kv"><span>${esc(r.name)}</span>
+        <span class="muted">${r.count}× · ${round1(r.dist)} км${r.dur ? ' · ' + fmtDuration(r.dur) : ''}</span></div>`).join('');
+  return `
+    <h2 class="section">Кардіо</h2>
+    <div class="tiles">
+      <div class="tile"><div class="tile-v">${round1(tw.dist)}</div><div class="tile-l">км цього тижня</div></div>
+      <div class="tile"><div class="tile-v">${round1(tm.dist)}</div><div class="tile-l">км цього місяця</div></div>
+      <div class="tile"><div class="tile-v">${round1(ty.dist)}</div><div class="tile-l">км цього року</div></div>
+    </div>
+    <section class="card chart-card">
+      <div class="chart-title"><span class="strong">Км на тиждень</span><span class="muted small">останні 12 тижнів</span></div>
+      ${chartBox('chart-cardio')}
+    </section>
+    ${rows ? `<section class="card"><h3>Цього місяця</h3>${rows}</section>` : ''}`;
+}
+
+// ----- Вправи -----
+
 /** Вправи, які хоч раз виконувались, — від нещодавніх */
 function statExercises() {
   const usage = S.exerciseUsage();
@@ -374,12 +449,10 @@ function currentChart() {
 
 function progressSection() {
   const c = currentChart();
-  if (!c) return '';
+  if (!c) return '<p class="empty">Ще немає виконаних вправ.</p>';
   const st = state.stats;
   const { list, ex, metrics, metric, pts } = c;
   const options = list.map((x) => `<option value="${esc(x.id)}" ${x.id === ex.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
-  const chips = (items, cur, action) => `<div class="chips scroll">${items.map(([id, label]) =>
-    `<button class="chip-btn ${id === cur ? 'on' : ''}" data-action="${action}" ${da({ v: id })}>${label}</button>`).join('')}</div>`;
   const table = st.table
     ? `<div class="ttable">${pts.slice().reverse().map((p) => `
         <button class="trow" data-action="open-workout" ${da({ id: p.wid })}>
@@ -391,22 +464,111 @@ function progressSection() {
         <div class="tile-v">${esc(r.value)}</div>
         <div class="tile-l">${r.sub ? esc(r.sub) + ' · ' : ''}${fmtDateShort(r.at)}</div>
       </button>`).join('');
+  const note = {
+    e1rm: 'розрахунок з найкращого підходу',
+    rel: 'у скільки разів 1ПМ більший за твою вагу',
+    pace: 'менше — краще',
+  }[metric.id];
   return `
-    <h2 class="section">Прогрес по вправі</h2>
     <select class="ex-select" data-change="stats-ex" aria-label="Вправа">${options}</select>
-    ${chips(metrics.map((m) => [m.id, m.label]), metric.id, 'stats-metric')}
-    ${chips(PERIODS, st.period, 'stats-period')}
+    ${chipRow(metrics.map((m) => [m.id, m.label]), metric.id, 'stats-metric')}
+    ${chipRow(PERIODS, st.period, 'stats-period')}
     <section class="card chart-card">
       <div class="chart-title"><span class="strong">${metric.label}${metric.unit ? `, ${metric.unit}` : ''}</span>
-        ${metric.id === 'e1rm' ? '<span class="muted small">розрахунок з найкращого підходу</span>' : ''}
-        ${metric.lowerBetter ? '<span class="muted small">менше — краще</span>' : ''}</div>
-      <div class="chart-wrap"><div id="chart" class="chart"></div><div id="chart-tip" class="chart-tip" hidden></div></div>
+        ${note ? `<span class="muted small">${note}</span>` : ''}</div>
+      ${chartBox('chart')}
       <button class="btn ghost block small-btn" data-action="stats-table">${st.table ? 'Сховати таблицю' : 'Показати таблицею'}</button>
       ${table}
     </section>
     <h2 class="section">Рекорди 🏆</h2>
     <div class="tiles two">${recs}</div>`;
 }
+
+// ----- Тіло -----
+
+function bodySection() {
+  const st = state.stats, d = S.get(), goal = d.settings.goalWeight;
+  const list = ST.bwSorted();
+  const last = list[list.length - 1];
+  const today = localDateKey();
+  const form = `
+    <form class="card" data-form="bw-add">
+      <div class="set-fields">
+        <label class="fld"><span>Дата</span><input type="date" name="date" value="${today}" max="${today}" required></label>
+        <label class="fld"><span>Вага, кг</span><input name="weight" inputmode="decimal" autocomplete="off" placeholder="${last ? fmtIn(last.weight) : 'напр. 78,5'}"></label>
+      </div>
+      <button class="btn primary block">Записати вагу</button>
+    </form>`;
+  const goalBtn = `<button class="btn block" data-action="bw-goal">${goal ? `Ціль: ${round1(goal)} кг — змінити` : 'Встановити ціль ваги'}</button>`;
+  if (!list.length) {
+    return form + goalBtn + '<p class="empty">Найточніше — зважуватися зранку натщесерце, наприклад раз на кілька днів.</p>';
+  }
+  const now = Date.now();
+  const avgNow = ST.bwAvg7(now) ?? last.weight;
+  const avgPrev = ST.bwAvg7(now - 30 * 864e5);
+  const rows = list.slice().reverse().slice(0, st.bwAll ? undefined : 10).map((b) => {
+    const i = list.indexOf(b), prev = list[i - 1];
+    const diff = prev ? b.weight - prev.weight : null;
+    return `<button class="trow" data-action="bw-edit" ${da({ id: b.id })}>
+        <span>${fmtDate(new Date(ST.dayMs(b.date)).toISOString())}</span>
+        <span><span class="strong">${round1(b.weight)} кг</span>${diff ? ` <span class="muted small">${signed(diff)}</span>` : ''}</span></button>`;
+  }).join('');
+  return `
+    ${form}
+    <div class="tiles">
+      <div class="tile"><div class="tile-v">${round1(last.weight)}</div><div class="tile-l">остання, кг · ${fmtDateShort(new Date(ST.dayMs(last.date)).toISOString())}</div></div>
+      <div class="tile"><div class="tile-v">${round1(avgNow)}</div><div class="tile-l">середнє за 7 днів</div></div>
+      <div class="tile"><div class="tile-v">${avgPrev != null ? signed(avgNow - avgPrev) : '—'}</div><div class="tile-l">кг за 30 днів</div></div>
+    </div>
+    ${goal ? `<div class="card goal-card"><span>🎯 Ціль <b>${round1(goal)} кг</b></span><span class="muted">${Math.abs(goal - avgNow) < 0.05 ? 'досягнуто!' : `залишилось ${signed(goal - avgNow)} кг`}</span></div>` : ''}
+    ${chipRow(PERIODS, st.bwPeriod, 'bw-period')}
+    <section class="card chart-card">
+      <div class="chart-title"><span class="strong">Вага тіла, кг</span></div>
+      <div class="legend"><span><i class="lg-dot"></i>записи</span><span><i class="lg-line"></i>середнє за 7 днів</span>${goal ? '<span><i class="lg-goal"></i>ціль</span>' : ''}</div>
+      ${chartBox('chart-bw')}
+    </section>
+    ${goalBtn}
+    <p class="muted small hint">Відносна сила (1ПМ ÷ вага тіла) — у «Статистика → Вправи» для силових вправ.</p>
+    <h2 class="section">Записи</h2>
+    <section class="card ttable">${rows}</section>
+    ${list.length > 10 ? `<button class="btn ghost block" data-action="bw-all">${st.bwAll ? 'Показати менше' : `Показати всі (${list.length})`}</button>` : ''}`;
+}
+
+function openBwForm(id) {
+  const b = S.get().bodyWeights.find((x) => x.id === id);
+  if (!b) return;
+  openModal(`<form data-form="bw-edit" ${da({ id })}>
+      <h2>Запис ваги</h2>
+      <div class="set-fields">
+        <label class="fld"><span>Дата</span><input type="date" name="date" value="${b.date}" max="${localDateKey()}" required></label>
+        <label class="fld"><span>Вага, кг</span><input name="weight" inputmode="decimal" autocomplete="off" value="${fmtIn(b.weight)}"></label>
+      </div>
+      <button class="btn primary block">Зберегти</button>
+      <div class="row"><button type="button" class="btn danger-ghost" data-action="bw-delete" ${da({ id })}>Видалити</button>${cancelBtn()}</div>
+    </form>`);
+}
+
+function openGoalForm() {
+  const g = S.get().settings.goalWeight;
+  openModal(`<form data-form="bw-goal">
+      <h2>Ціль ваги</h2>
+      <label class="fld"><span>Бажана вага, кг (залиш порожнім, щоб прибрати ціль)</span>
+        <input name="goal" inputmode="decimal" autocomplete="off" value="${g ? fmtIn(g) : ''}"></label>
+      <div class="row">${cancelBtn()}<button class="btn primary">Зберегти</button></div>
+    </form>`);
+}
+
+/** Перевірка запису ваги з форми: {date, weight} або {error} */
+function readBw(fd) {
+  const date = String(fd.get('date') || '');
+  const w = parseNum(fd.get('weight'));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: 'Вкажи дату' };
+  if (date > localDateKey()) return { error: 'Дата не може бути в майбутньому' };
+  if (w == null || Number.isNaN(w) || w < 20 || w > 400) return { error: 'Вкажи вагу в кг (від 20 до 400)' };
+  return { date, weight: Math.round(w * 100) / 100 };
+}
+
+// ----- Графіки -----
 
 function niceTicks(lo, hi, n, int) {
   let step = (hi - lo) / n;
@@ -419,80 +581,152 @@ function niceTicks(lo, hi, n, int) {
   return out;
 }
 
-const CHART_COLOR = '#e8662f';
+const dateLabel = (t) => fmtDateShort(new Date(t).toISOString());
 
-function drawChart() {
-  const el = $('#chart');
-  const c = el && currentChart();
-  if (!c) return;
-  const { pts, metric } = c;
+function setTip(tip, lines, left, top, W) {
+  tip.replaceChildren(...lines.map(([text, cls]) => { const d = document.createElement('div'); d.className = cls; d.textContent = text; return d; }));
+  tip.hidden = false;
+  const tw = tip.offsetWidth;
+  tip.style.left = `${Math.min(Math.max(left - tw / 2, 0), W - tw)}px`;
+  tip.style.top = `${Math.max(top, 0)}px`;
+}
+
+/**
+ * Лінійний графік. o = {pts:[{t,v}], fmt, int, dur, avg?:[{t,v}], goal?:number, emptyMsg?}
+ * З avg: записи — сірі точки, лінія — середнє. Без avg: лінія з точками по pts.
+ */
+function lineChart(el, o) {
+  const tip = el.nextElementSibling;
+  const { pts, fmt, avg = null, goal = null } = o;
   if (pts.length < 2) {
-    el.innerHTML = `<p class="muted small chart-empty">${pts.length
-      ? `Лише одне тренування за цей період: ${ST.fmtMetric(metric, pts[0].v)}. Для графіка потрібно щонайменше два — або обери довший період.`
-      : 'Немає даних за цей період. Обери довший період.'}</p>`;
+    el.innerHTML = `<p class="muted small chart-empty">${o.emptyMsg || (pts.length
+      ? `Лише один запис за цей період: ${fmt(pts[0].v)}. Для графіка потрібно щонайменше два — або обери довший період.`
+      : 'Немає даних за цей період. Обери довший період.')}</p>`;
     return;
   }
   const W = Math.max(260, el.clientWidth), H = 220, L = 46, R = 16, T = 22, B = 26;
-  const vs = pts.map((p) => p.v);
-  let lo = Math.min(...vs), hi = Math.max(...vs);
-  if (lo === hi) { lo -= metric.int ? 1 : Math.max(1, Math.abs(lo) * 0.1); hi += metric.int ? 1 : Math.max(1, Math.abs(hi) * 0.1); }
+  const vals = [...pts.map((p) => p.v), ...(avg || []).map((p) => p.v)];
+  if (goal != null) vals.push(goal);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (lo === hi) { const pad = o.int ? 1 : Math.max(0.5, Math.abs(lo) * 0.05); lo -= pad; hi += pad; }
   if (lo < 0) lo = 0;
-  const ticks = niceTicks(lo, hi, 4, metric.int);
+  const ticks = niceTicks(lo, hi, 4, o.int);
   lo = ticks[0]; hi = ticks[ticks.length - 1];
   const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
   const x = (t) => L + ((t - t0) / (t1 - t0 || 1)) * (W - L - R);
   const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
-  const tickLabel = (v) => (metric.dur ? fmtDuration(v) : fmtNum(v));
-  const dateLabel = (t) => fmtDateShort(new Date(t).toISOString());
-
+  const tickLabel = (v) => (o.dur ? fmtDuration(v) : fmtNum(v));
+  const line = avg || pts;
   const grid = ticks.map((v) => `
       <line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>
       <text class="axis" x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${tickLabel(v)}</text>`).join('');
-  const path = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
-  const dots = pts.length <= 60 ? pts.map((p) => `<circle class="dot" cx="${x(p.t)}" cy="${y(p.v)}" r="4"/>`).join('') : '';
-  const lastP = pts[pts.length - 1];
+  const path = line.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const dots = avg
+    ? pts.map((p) => `<circle class="raw" cx="${x(p.t)}" cy="${y(p.v)}" r="3"/>`).join('')
+    : pts.length <= 60 ? pts.map((p) => `<circle class="dot" fill="${CHART_COLOR}" cx="${x(p.t)}" cy="${y(p.v)}" r="4"/>`).join('') : '';
+  const lastP = line[line.length - 1];
   el.innerHTML = `
-    <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(metric.label)}: графік">
+    <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Графік">
       ${grid}
+      ${goal != null ? `<line class="goal" x1="${L}" x2="${W - R}" y1="${y(goal)}" y2="${y(goal)}"/>` : ''}
       <text class="axis" x="${L}" y="${H - 6}" text-anchor="start">${dateLabel(t0)}</text>
       <text class="axis" x="${W - R}" y="${H - 6}" text-anchor="end">${dateLabel(t1)}</text>
+      ${avg ? dots : ''}
       <path d="${path}" fill="none" stroke="${CHART_COLOR}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-      ${dots.replaceAll('class="dot"', `class="dot" fill="${CHART_COLOR}"`)}
-      <text class="vlabel" x="${Math.min(x(lastP.t), W - R)}" y="${y(lastP.v) - 10}" text-anchor="end">${ST.fmtMetric(metric, lastP.v)}</text>
-      <line id="xhair" class="xhair" y1="${T}" y2="${H - B}" visibility="hidden"/>
-      <circle id="xdot" r="6" fill="${CHART_COLOR}" class="dot" visibility="hidden"/>
-      <rect id="hit" x="${L - 10}" y="0" width="${W - L - R + 20}" height="${H}" fill="transparent"/>
+      ${avg ? '' : dots}
+      <text class="vlabel" x="${Math.min(x(lastP.t), W - R)}" y="${y(lastP.v) - 10}" text-anchor="end">${fmt(lastP.v)}</text>
+      <line class="xhair" y1="${T}" y2="${H - B}" visibility="hidden"/>
+      <circle class="dot xdot" r="6" fill="${CHART_COLOR}" visibility="hidden"/>
+      <rect class="hit" x="${L - 10}" y="0" width="${W - L - R + 20}" height="${H}" fill="transparent"/>
     </svg>`;
 
-  // Підказка: палець або миша знаходить найближче тренування по горизонталі.
-  const svg = el.querySelector('svg'), tip = $('#chart-tip'), xh = $('#xhair'), xd = $('#xdot');
+  // Підказка: палець або миша знаходить найближчу точку по горизонталі.
+  const svg = el.querySelector('svg'), xh = svg.querySelector('.xhair'), xd = svg.querySelector('.xdot');
   const show = (ev) => {
     const px = ev.clientX - svg.getBoundingClientRect().left;
-    let best = pts[0];
-    for (const p of pts) if (Math.abs(x(p.t) - px) < Math.abs(x(best.t) - px)) best = p;
-    const bx = x(best.t), by = y(best.v);
+    let bi = 0;
+    pts.forEach((p, i) => { if (Math.abs(x(p.t) - px) < Math.abs(x(pts[bi].t) - px)) bi = i; });
+    const p = pts[bi], bx = x(p.t), by = y(p.v);
     xh.setAttribute('x1', bx); xh.setAttribute('x2', bx); xh.setAttribute('visibility', 'visible');
     xd.setAttribute('cx', bx); xd.setAttribute('cy', by); xd.setAttribute('visibility', 'visible');
-    tip.replaceChildren();
-    const v = document.createElement('div'); v.className = 'strong'; v.textContent = ST.fmtMetric(metric, best.v);
-    const d = document.createElement('div'); d.className = 'muted small'; d.textContent = fmtDate(new Date(best.t).toISOString());
-    tip.append(v, d);
-    tip.hidden = false;
-    const tw = tip.offsetWidth;
-    tip.style.left = `${Math.min(Math.max(bx - tw / 2, 0), W - tw)}px`;
-    tip.style.top = `${Math.max(by - 64, 0)}px`;
+    const lines = [[fmt(p.v), 'strong']];
+    if (avg) lines.push([`середнє ${fmt(avg[bi].v)}`, 'small']);
+    lines.push([fmtDate(new Date(p.t).toISOString()), 'muted small']);
+    setTip(tip, lines, bx, by - (avg ? 82 : 64), W);
   };
   const hide = () => { tip.hidden = true; xh.setAttribute('visibility', 'hidden'); xd.setAttribute('visibility', 'hidden'); };
-  const hit = $('#hit');
+  const hit = svg.querySelector('.hit');
   hit.addEventListener('pointerdown', show);
   hit.addEventListener('pointermove', show);
   hit.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') hide(); });
 }
 
+/** Стовпчики по тижнях. bars = [{start: Date, v, tipV}] */
+function barChart(el, bars, o = {}) {
+  const tip = el.nextElementSibling;
+  const maxV = Math.max(...bars.map((b) => b.v));
+  if (!maxV) { el.innerHTML = '<p class="muted small chart-empty">За останні 12 тижнів немає даних.</p>'; return; }
+  const W = Math.max(260, el.clientWidth), H = 170, L = 34, R = 6, T = 12, B = 24;
+  const ticks = niceTicks(0, maxV, 3, o.int), hi = ticks[ticks.length - 1];
+  const n = bars.length, slot = (W - L - R) / n, bw = Math.max(4, slot - 6);
+  const y = (v) => T + (1 - v / hi) * (H - T - B), base = H - B;
+  const grid = ticks.map((v) => `
+      <line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>
+      <text class="axis" x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${fmtNum(v)}</text>`).join('');
+  const rects = bars.map((b, i) => {
+    if (!b.v) return '';
+    const x0 = L + i * slot + (slot - bw) / 2, top = y(b.v), r = Math.min(4, base - top, bw / 2);
+    return `<path class="bar" data-i="${i}" fill="${CHART_COLOR}" d="M${x0},${base}V${top + r}Q${x0},${top} ${x0 + r},${top}H${x0 + bw - r}Q${x0 + bw},${top} ${x0 + bw},${top + r}V${base}Z"/>`;
+  }).join('');
+  const labelIdx = [0, Math.floor((n - 1) / 2), n - 1];
+  const xl = labelIdx.map((i, k) => `<text class="axis" x="${k === 0 ? L : k === 2 ? W - R : L + i * slot + slot / 2}" y="${H - 6}" text-anchor="${k === 0 ? 'start' : k === 2 ? 'end' : 'middle'}">${dateLabel(bars[i].start.getTime())}</text>`).join('');
+  el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Стовпчиковий графік">
+      ${grid}${rects}${xl}<rect class="hit" x="${L}" y="0" width="${W - L - R}" height="${H}" fill="transparent"/></svg>`;
+
+  const svg = el.querySelector('svg');
+  const show = (ev) => {
+    const i = Math.min(n - 1, Math.max(0, Math.floor((ev.clientX - svg.getBoundingClientRect().left - L) / slot)));
+    svg.querySelectorAll('.bar').forEach((p) => p.classList.toggle('dim', Number(p.dataset.i) !== i));
+    const b = bars[i];
+    setTip(tip, [[b.tipV, 'strong'], [`тиждень з ${dateLabel(b.start.getTime())}`, 'muted small']], L + i * slot + slot / 2, Math.min(y(b.v), base) - 60, W);
+  };
+  const hit = svg.querySelector('.hit');
+  hit.addEventListener('pointerdown', show);
+  hit.addEventListener('pointermove', show);
+  hit.addEventListener('pointerleave', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    tip.hidden = true;
+    svg.querySelectorAll('.bar').forEach((p) => p.classList.remove('dim'));
+  });
+}
+
+function drawStatsCharts() {
+  const st = state.stats;
+  if (st.view === 'overview') {
+    const f = $('#chart-freq');
+    if (f) barChart(f, ST.weeklyBuckets(12, () => 1).map((b) => ({ ...b, tipV: `${b.v} ${plural(b.v, 'тренування', 'тренування', 'тренувань')}` })), { int: true });
+    const c = $('#chart-cardio');
+    if (c) barChart(c, ST.weeklyBuckets(12, ST.cardioDist).map((b) => ({ ...b, tipV: `${round1(b.v)} км` })));
+  } else if (st.view === 'exercise') {
+    const el = $('#chart'), c = el && currentChart();
+    if (!c) return;
+    lineChart(el, {
+      pts: c.pts, int: c.metric.int, dur: c.metric.dur,
+      fmt: (v) => ST.fmtMetric(c.metric, v),
+      emptyMsg: c.metric.id === 'rel' && !S.get().bodyWeights.length ? 'Спершу запиши вагу тіла: «Статистика → Тіло».' : null,
+    });
+  } else {
+    const el = $('#chart-bw');
+    if (!el) return;
+    const { pts, avg } = ST.bwSeries(periodStart(st.bwPeriod));
+    lineChart(el, { pts, avg, goal: S.get().settings.goalWeight, fmt: (v) => `${round1(v)} кг` });
+  }
+}
+
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { if (state.tab === 'stats') drawChart(); }, 150);
+  resizeTimer = setTimeout(() => { if (state.tab === 'stats') drawStatsCharts(); }, 150);
 });
 
 // ---------- Вкладка «Вправи» ----------
@@ -940,6 +1174,17 @@ const actions = {
   'stats-metric'({ v }) { state.stats.metric = v; render(); },
   'stats-period'({ v }) { state.stats.period = v; render(); },
   'stats-table'() { state.stats.table = !state.stats.table; render(); },
+  'stats-view'({ v }) { state.stats.view = v; render(); window.scrollTo(0, 0); },
+  'grp-period'({ v }) { state.stats.grpPeriod = v; render(); },
+  'bw-period'({ v }) { state.stats.bwPeriod = v; render(); },
+  'bw-all'() { state.stats.bwAll = !state.stats.bwAll; render(); },
+  'bw-edit'({ id }) { openBwForm(id); },
+  'bw-goal'() { openGoalForm(); },
+  'bw-delete'({ id }) {
+    if (!confirm('Видалити цей запис ваги?')) return;
+    S.mutate((d) => { d.bodyWeights = d.bodyWeights.filter((b) => b.id !== id); });
+    closeModal(); render();
+  },
 
   export: doExport,
   import() { importInput.click(); },
@@ -1021,6 +1266,33 @@ const forms = {
     render();
     if (newEid) focusEntry(newEid);
     else toast(id ? 'Збережено' : 'Вправу створено');
+  },
+  'bw-add'(f, fd) {
+    const r = readBw(fd);
+    if (r.error) return toast(r.error);
+    let updated = false;
+    S.mutate((d) => {
+      const same = d.bodyWeights.find((b) => b.date === r.date);
+      if (same) { same.weight = r.weight; updated = true; }
+      else d.bodyWeights.push({ id: S.uid(), ...r });
+    });
+    render();
+    toast(updated ? 'Запис на цю дату оновлено' : 'Вагу записано ✓');
+  },
+  'bw-edit'(f, fd) {
+    const r = readBw(fd);
+    if (r.error) return toast(r.error);
+    const { id } = f.dataset;
+    if (S.get().bodyWeights.some((b) => b.id !== id && b.date === r.date)) return toast('На цю дату вже є запис');
+    S.mutate((d) => Object.assign(d.bodyWeights.find((b) => b.id === id), r));
+    closeModal(); render();
+  },
+  'bw-goal'(f, fd) {
+    const g = parseNum(fd.get('goal'));
+    if (g != null && (Number.isNaN(g) || g < 20 || g > 400)) return toast('Вкажи вагу в кг (від 20 до 400)');
+    S.mutate((d) => { d.settings.goalWeight = g; });
+    closeModal(); render();
+    toast(g ? 'Ціль збережено 🎯' : 'Ціль прибрано');
   },
   template(f, fd) {
     const name = String(fd.get('name') || '').trim().replace(/\s+/g, ' ');

@@ -5,7 +5,7 @@
 //   exercises: [{id, name, type, muscleGroupIds, archived, createdAt}],
 //   workouts: [{id, startedAt, finishedAt, note, entries: [{id, exerciseId, sets: [{id, weight, reps, distance, duration, at}]}]}],
 //   templates: [{id, name, exerciseIds}],
-//   bodyWeights: [], settings: {lastBackupAt}
+//   bodyWeights: [{id, date: 'YYYY-MM-DD', weight}], settings: {lastBackupAt, goalWeight}
 // }
 // weight — кг, distance — км, duration — секунди. Невикористані поля = null.
 
@@ -36,7 +36,7 @@ function emptyData() {
     workouts: [],
     bodyWeights: [],
     templates: [],
-    settings: { lastBackupAt: null },
+    settings: { lastBackupAt: null, goalWeight: null },
   };
 }
 
@@ -120,7 +120,9 @@ function normalize(d) {
               })),
           })),
       })),
-    bodyWeights: Array.isArray(d.bodyWeights) ? d.bodyWeights : [],
+    bodyWeights: (Array.isArray(d.bodyWeights) ? d.bodyWeights : [])
+      .filter((b) => b && b.id && /^\d{4}-\d{2}-\d{2}$/.test(b.date) && num(b.weight) > 0)
+      .map((b) => ({ id: String(b.id), date: b.date, weight: b.weight })),
     templates: (Array.isArray(d.templates) ? d.templates : [])
       .filter((t) => t && t.id && t.name)
       .map((t) => ({
@@ -128,7 +130,10 @@ function normalize(d) {
         name: String(t.name),
         exerciseIds: Array.isArray(t.exerciseIds) ? t.exerciseIds.map(String) : [],
       })),
-    settings: { lastBackupAt: isDate(d.settings?.lastBackupAt) ? d.settings.lastBackupAt : null },
+    settings: {
+      lastBackupAt: isDate(d.settings?.lastBackupAt) ? d.settings.lastBackupAt : null,
+      goalWeight: num(d.settings?.goalWeight) > 0 ? d.settings.goalWeight : null,
+    },
   };
 }
 
