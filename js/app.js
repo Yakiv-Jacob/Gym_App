@@ -5,6 +5,7 @@ import {
   fmtDate, fmtDateShort, fmtTime, toLocalInput, fromLocalInput, localDateKey, plural,
 } from './util.js';
 
+const APP_VERSION = '1.0';
 const $ = (s) => document.querySelector(s);
 const main = $('#main'), titleEl = $('#title'), backBtn = $('#back');
 const modal = $('#modal'), modalBody = $('#modal-body'), toastEl = $('#toast'), importInput = $('#import-file');
@@ -793,6 +794,7 @@ function viewMore() {
 
     <section class="card">
       <h3>Дані</h3>
+      <p class="small muted">Версія програми ${APP_VERSION}</p>
       <p class="small muted">${d.exercises.length} ${plural(d.exercises.length, 'вправа', 'вправи', 'вправ')} · ${d.workouts.length} ${plural(d.workouts.length, 'тренування', 'тренування', 'тренувань')} · ${S.countSets()} ${plural(S.countSets(), 'підхід', 'підходи', 'підходів')}</p>
     </section>`;
 }
@@ -1186,6 +1188,12 @@ const actions = {
     closeModal(); render();
   },
 
+  'apply-update'() {
+    // Дані вже збережені після кожної дії, тож перезавантаження нічого не втратить.
+    if (swReg?.waiting) swReg.waiting.postMessage('skip-waiting');
+    else location.reload();
+  },
+
   export: doExport,
   import() { importInput.click(); },
 };
@@ -1411,6 +1419,29 @@ modal.addEventListener('keydown', (e) => {
 // ====================================================================
 // Старт
 // ====================================================================
+
+// Робота без інтернету та оновлення програми
+let swReg = null;
+function showUpdateBar() { $('#update-bar').hidden = false; }
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  let reloading = false;
+  const hadController = !!navigator.serviceWorker.controller; // при найпершому відкритті — не перезавантажувати
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloading) { reloading = true; location.reload(); }
+  });
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    swReg = reg;
+    if (reg.waiting && navigator.serviceWorker.controller) showUpdateBar();
+    reg.addEventListener('updatefound', () => {
+      const nw = reg.installing;
+      nw?.addEventListener('statechange', () => {
+        if (nw.state === 'installed' && navigator.serviceWorker.controller) showUpdateBar();
+      });
+    });
+    // Перевіряти оновлення щоразу, коли програму відкривають знову.
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+  }).catch((e) => console.warn('SW:', e));
+}
 
 const loadResult = S.load();
 S.setSaveErrorHandler(() => toast('⚠️ Не вдалося зберегти дані! Зроби експорт.', 6000));
