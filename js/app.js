@@ -1,4 +1,5 @@
 import * as S from './store.js';
+import * as ST from './stats.js';
 import {
   esc, parseNum, fmtNum, fmtIn, fmtDuration, fmtPace, fmtMinutes, fmtMonth,
   fmtDate, fmtDateShort, fmtTime, toLocalInput, fromLocalInput, localDateKey, plural,
@@ -8,8 +9,12 @@ const $ = (s) => document.querySelector(s);
 const main = $('#main'), titleEl = $('#title'), backBtn = $('#back');
 const modal = $('#modal'), modalBody = $('#modal-body'), toastEl = $('#toast'), importInput = $('#import-file');
 
-const TITLES = { workout: 'Тренування', history: 'Історія', exercises: 'Вправи', more: 'Ще' };
-const state = { tab: 'workout', detailId: null, exFilter: 'all' };
+const TITLES = { workout: 'Тренування', history: 'Історія', stats: 'Статистика', exercises: 'Вправи', more: 'Ще' };
+const state = {
+  tab: 'workout', detailId: null, exFilter: 'all',
+  // Статистика: місяць календаря (перше число), вибраний день, вправа, показник, період, таблиця
+  stats: { month: null, day: null, exId: null, metric: null, period: '3m', table: false },
+};
 
 /** data-атрибути з об'єкта */
 const da = (o) => Object.entries(o).map(([k, v]) => `data-${k}="${esc(v ?? '')}"`).join(' ');
@@ -29,12 +34,13 @@ function render() {
     title = fmtDate(w.startedAt);
     html = workoutEditor(w, !w.finishedAt);
   } else {
-    html = { workout: viewWorkoutTab, history: viewHistory, exercises: viewExercises, more: viewMore }[state.tab]();
+    html = { workout: viewWorkoutTab, history: viewHistory, stats: viewStats, exercises: viewExercises, more: viewMore }[state.tab]();
   }
   backBtn.hidden = !(state.tab === 'history' && state.detailId);
   titleEl.textContent = title;
   main.innerHTML = html;
   if (state.tab === 'more') fillStorageStatus();
+  if (state.tab === 'stats') drawChart();
 }
 
 // ---------- Форматування підходів ----------
@@ -218,8 +224,11 @@ function entryCard(w, e) {
   const ex = S.exerciseById(e.exerciseId);
   const type = ex?.type || 'strength';
   const ids = { wid: w.id, eid: e.id };
-  const sets = e.sets.map((s, j) =>
-    `<li><button class="set" data-action="edit-set" ${da({ ...ids, sid: s.id })}><span class="n">${j + 1}</span><span>${fmtSet(type, s)}</span></button></li>`).join('');
+  const prs = ST.prFlags(w, e, type);
+  const sets = e.sets.map((s, j) => {
+    const pr = prs.get(s.id);
+    return `<li><button class="set" data-action="edit-set" ${da({ ...ids, sid: s.id })}><span class="n">${j + 1}</span><span>${fmtSet(type, s)}</span>${pr ? `<span class="pr" title="Рекорд: ${pr.join(', ')}">🏆 ${pr.join(', ')}</span>` : ''}</button></li>`;
+  }).join('');
   const summary = entrySummary(type, e.sets);
   const prev = S.lastPerformance(e.exerciseId, w);
   // Підказка у полях: останній підхід цього тренування, а якщо ще немає — перший підхід минулого разу.
@@ -267,6 +276,224 @@ function viewHistory() {
   }
   return html;
 }
+
+// ---------- Вкладка «Статистика» ----------
+
+const WEEKDAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'];
+const PERIODS = [['1m', '1 міс'], ['3m', '3 міс'], ['1y', 'Рік'], ['all', 'Все']];
+
+function periodStart(p) {
+  const d = new Date();
+  if (p === '1m') d.setMonth(d.getMonth() - 1);
+  else if (p === '3m') d.setMonth(d.getMonth() - 3);
+  else if (p === '1y') d.setFullYear(d.getFullYear() - 1);
+  else return 0;
+  return d.getTime();
+}
+
+function weekStart(date = new Date()) {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return d;
+}
+
+function viewStats() {
+  const all = S.get().workouts;
+  if (!all.length) return '<p class="empty">Статистика з\'явиться після першого тренування.</p>';
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const wk = weekStart(now).getTime();
+  const count = (from) => all.filter((w) => Date.parse(w.startedAt) >= from).length;
+  return `
+    <div class="tiles">
+      <div class="tile"><div class="tile-v">${count(wk)}</div><div class="tile-l">цього тижня</div></div>
+      <div class="tile"><div class="tile-v">${count(monthStart)}</div><div class="tile-l">цього місяця</div></div>
+      <div class="tile"><div class="tile-v">${all.length}</div><div class="tile-l">всього</div></div>
+    </div>
+    ${calendarSection()}
+    ${progressSection()}`;
+}
+
+function calendarSection() {
+  const st = state.stats, now = new Date();
+  if (!st.month) st.month = new Date(now.getFullYear(), now.getMonth(), 1);
+  const y = st.month.getFullYear(), m = st.month.getMonth();
+  const byDay = new Map();
+  for (const w of S.get().workouts) {
+    const k = localDateKey(new Date(w.startedAt));
+    byDay.set(k, [...(byDay.get(k) || []), w]);
+  }
+  const offset = (new Date(y, m, 1).getDay() + 6) % 7;
+  const days = new Date(y, m + 1, 0).getDate();
+  const todayKey = localDateKey(now);
+  let cells = WEEKDAYS.map((d) => `<div class="wd">${d}</div>`).join('') + '<div></div>'.repeat(offset);
+  let inMonth = 0;
+  for (let day = 1; day <= days; day++) {
+    const key = localDateKey(new Date(y, m, day));
+    const ws = byDay.get(key);
+    const cls = ['cal-day', ws ? 'on' : '', key === todayKey ? 'today' : '', key === st.day ? 'sel' : ''].join(' ');
+    if (ws) {
+      inMonth += ws.length;
+      cells += `<button class="${cls}" data-action="cal-day" ${da({ key })} aria-label="${day}: ${ws.length} ${plural(ws.length, 'тренування', 'тренування', 'тренувань')}">${day}</button>`;
+    } else cells += `<span class="${cls}">${day}</span>`;
+  }
+  const isCurrent = y === now.getFullYear() && m === now.getMonth();
+  const dayList = st.day && byDay.get(st.day);
+  return `
+    <section class="card">
+      <div class="cal-head">
+        <button class="icon" data-action="cal-month" data-dir="-1" aria-label="Попередній місяць">‹</button>
+        <div class="strong">${fmtMonth(st.month.toISOString())}</div>
+        <button class="icon" data-action="cal-month" data-dir="1" ${isCurrent ? 'disabled' : ''} aria-label="Наступний місяць">›</button>
+      </div>
+      <div class="cal">${cells}</div>
+      <p class="muted small cal-foot">${inMonth} ${plural(inMonth, 'тренування', 'тренування', 'тренувань')} за місяць${inMonth ? ' · натисни на день, щоб побачити деталі' : ''}</p>
+    </section>
+    ${dayList ? dayList.map(workoutCard).join('') : ''}`;
+}
+
+/** Вправи, які хоч раз виконувались, — від нещодавніх */
+function statExercises() {
+  const usage = S.exerciseUsage();
+  return S.get().exercises
+    .filter((x) => usage.has(x.id))
+    .sort((a, b) => Date.parse(usage.get(b.id).last) - Date.parse(usage.get(a.id).last));
+}
+
+function currentChart() {
+  const st = state.stats;
+  const list = statExercises();
+  if (!list.length) return null;
+  if (!list.some((x) => x.id === st.exId)) st.exId = list[0].id;
+  const ex = S.exerciseById(st.exId);
+  const metrics = ST.METRICS[ex.type];
+  const metric = metrics.find((m) => m.id === st.metric) || metrics[0];
+  st.metric = metric.id;
+  return { list, ex, metrics, metric, pts: ST.series(ex.id, metric, periodStart(st.period)) };
+}
+
+function progressSection() {
+  const c = currentChart();
+  if (!c) return '';
+  const st = state.stats;
+  const { list, ex, metrics, metric, pts } = c;
+  const options = list.map((x) => `<option value="${esc(x.id)}" ${x.id === ex.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
+  const chips = (items, cur, action) => `<div class="chips scroll">${items.map(([id, label]) =>
+    `<button class="chip-btn ${id === cur ? 'on' : ''}" data-action="${action}" ${da({ v: id })}>${label}</button>`).join('')}</div>`;
+  const table = st.table
+    ? `<div class="ttable">${pts.slice().reverse().map((p) => `
+        <button class="trow" data-action="open-workout" ${da({ id: p.wid })}>
+          <span>${fmtDate(new Date(p.t).toISOString())}</span><span class="strong">${ST.fmtMetric(metric, p.v)}</span></button>`).join('') || '<p class="muted small">Немає даних за цей період.</p>'}</div>`
+    : '';
+  const recs = ST.records(ex.id, ex.type).map((r) => `
+      <button class="tile rec" data-action="open-workout" ${da({ id: r.wid })}>
+        <div class="tile-l">${r.label}</div>
+        <div class="tile-v">${esc(r.value)}</div>
+        <div class="tile-l">${r.sub ? esc(r.sub) + ' · ' : ''}${fmtDateShort(r.at)}</div>
+      </button>`).join('');
+  return `
+    <h2 class="section">Прогрес по вправі</h2>
+    <select class="ex-select" data-change="stats-ex" aria-label="Вправа">${options}</select>
+    ${chips(metrics.map((m) => [m.id, m.label]), metric.id, 'stats-metric')}
+    ${chips(PERIODS, st.period, 'stats-period')}
+    <section class="card chart-card">
+      <div class="chart-title"><span class="strong">${metric.label}${metric.unit ? `, ${metric.unit}` : ''}</span>
+        ${metric.id === 'e1rm' ? '<span class="muted small">розрахунок з найкращого підходу</span>' : ''}
+        ${metric.lowerBetter ? '<span class="muted small">менше — краще</span>' : ''}</div>
+      <div class="chart-wrap"><div id="chart" class="chart"></div><div id="chart-tip" class="chart-tip" hidden></div></div>
+      <button class="btn ghost block small-btn" data-action="stats-table">${st.table ? 'Сховати таблицю' : 'Показати таблицею'}</button>
+      ${table}
+    </section>
+    <h2 class="section">Рекорди 🏆</h2>
+    <div class="tiles two">${recs}</div>`;
+}
+
+function niceTicks(lo, hi, n, int) {
+  let step = (hi - lo) / n;
+  const mag = 10 ** Math.floor(Math.log10(step));
+  const err = step / mag;
+  step = (err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1) * mag;
+  if (int) step = Math.max(1, Math.round(step));
+  const out = [];
+  for (let v = Math.floor(lo / step) * step; v <= Math.ceil(hi / step) * step + step / 2; v += step) out.push(Math.round(v * 1e6) / 1e6);
+  return out;
+}
+
+const CHART_COLOR = '#e8662f';
+
+function drawChart() {
+  const el = $('#chart');
+  const c = el && currentChart();
+  if (!c) return;
+  const { pts, metric } = c;
+  if (pts.length < 2) {
+    el.innerHTML = `<p class="muted small chart-empty">${pts.length
+      ? `Лише одне тренування за цей період: ${ST.fmtMetric(metric, pts[0].v)}. Для графіка потрібно щонайменше два — або обери довший період.`
+      : 'Немає даних за цей період. Обери довший період.'}</p>`;
+    return;
+  }
+  const W = Math.max(260, el.clientWidth), H = 220, L = 46, R = 16, T = 22, B = 26;
+  const vs = pts.map((p) => p.v);
+  let lo = Math.min(...vs), hi = Math.max(...vs);
+  if (lo === hi) { lo -= metric.int ? 1 : Math.max(1, Math.abs(lo) * 0.1); hi += metric.int ? 1 : Math.max(1, Math.abs(hi) * 0.1); }
+  if (lo < 0) lo = 0;
+  const ticks = niceTicks(lo, hi, 4, metric.int);
+  lo = ticks[0]; hi = ticks[ticks.length - 1];
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+  const x = (t) => L + ((t - t0) / (t1 - t0 || 1)) * (W - L - R);
+  const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  const tickLabel = (v) => (metric.dur ? fmtDuration(v) : fmtNum(v));
+  const dateLabel = (t) => fmtDateShort(new Date(t).toISOString());
+
+  const grid = ticks.map((v) => `
+      <line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>
+      <text class="axis" x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${tickLabel(v)}</text>`).join('');
+  const path = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const dots = pts.length <= 60 ? pts.map((p) => `<circle class="dot" cx="${x(p.t)}" cy="${y(p.v)}" r="4"/>`).join('') : '';
+  const lastP = pts[pts.length - 1];
+  el.innerHTML = `
+    <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(metric.label)}: графік">
+      ${grid}
+      <text class="axis" x="${L}" y="${H - 6}" text-anchor="start">${dateLabel(t0)}</text>
+      <text class="axis" x="${W - R}" y="${H - 6}" text-anchor="end">${dateLabel(t1)}</text>
+      <path d="${path}" fill="none" stroke="${CHART_COLOR}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      ${dots.replaceAll('class="dot"', `class="dot" fill="${CHART_COLOR}"`)}
+      <text class="vlabel" x="${Math.min(x(lastP.t), W - R)}" y="${y(lastP.v) - 10}" text-anchor="end">${ST.fmtMetric(metric, lastP.v)}</text>
+      <line id="xhair" class="xhair" y1="${T}" y2="${H - B}" visibility="hidden"/>
+      <circle id="xdot" r="6" fill="${CHART_COLOR}" class="dot" visibility="hidden"/>
+      <rect id="hit" x="${L - 10}" y="0" width="${W - L - R + 20}" height="${H}" fill="transparent"/>
+    </svg>`;
+
+  // Підказка: палець або миша знаходить найближче тренування по горизонталі.
+  const svg = el.querySelector('svg'), tip = $('#chart-tip'), xh = $('#xhair'), xd = $('#xdot');
+  const show = (ev) => {
+    const px = ev.clientX - svg.getBoundingClientRect().left;
+    let best = pts[0];
+    for (const p of pts) if (Math.abs(x(p.t) - px) < Math.abs(x(best.t) - px)) best = p;
+    const bx = x(best.t), by = y(best.v);
+    xh.setAttribute('x1', bx); xh.setAttribute('x2', bx); xh.setAttribute('visibility', 'visible');
+    xd.setAttribute('cx', bx); xd.setAttribute('cy', by); xd.setAttribute('visibility', 'visible');
+    tip.replaceChildren();
+    const v = document.createElement('div'); v.className = 'strong'; v.textContent = ST.fmtMetric(metric, best.v);
+    const d = document.createElement('div'); d.className = 'muted small'; d.textContent = fmtDate(new Date(best.t).toISOString());
+    tip.append(v, d);
+    tip.hidden = false;
+    const tw = tip.offsetWidth;
+    tip.style.left = `${Math.min(Math.max(bx - tw / 2, 0), W - tw)}px`;
+    tip.style.top = `${Math.max(by - 64, 0)}px`;
+  };
+  const hide = () => { tip.hidden = true; xh.setAttribute('visibility', 'hidden'); xd.setAttribute('visibility', 'hidden'); };
+  const hit = $('#hit');
+  hit.addEventListener('pointerdown', show);
+  hit.addEventListener('pointermove', show);
+  hit.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') hide(); });
+}
+
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (state.tab === 'stats') drawChart(); }, 150);
+});
 
 // ---------- Вкладка «Вправи» ----------
 
@@ -703,6 +930,17 @@ const actions = {
     toast(`Почато: ${t.name}`);
   },
 
+  'cal-month'({ dir }) {
+    const m = state.stats.month;
+    state.stats.month = new Date(m.getFullYear(), m.getMonth() + Number(dir), 1);
+    state.stats.day = null;
+    render();
+  },
+  'cal-day'({ key }) { state.stats.day = state.stats.day === key ? null : key; render(); },
+  'stats-metric'({ v }) { state.stats.metric = v; render(); },
+  'stats-period'({ v }) { state.stats.period = v; render(); },
+  'stats-table'() { state.stats.table = !state.stats.table; render(); },
+
   export: doExport,
   import() { importInput.click(); },
 };
@@ -714,9 +952,12 @@ const forms = {
     if (!e) return;
     const r = readSet(exType(e.exerciseId), fd);
     if (r.error) return toast(r.error);
-    S.mutate(() => e.sets.push({ id: S.uid(), ...r.set, at: nowIso() }));
+    const sid = S.uid();
+    S.mutate(() => e.sets.push({ id: sid, ...r.set, at: nowIso() }));
     render();
     document.querySelector(`.entry[data-eid="${CSS.escape(eid)}"]`)?.scrollIntoView({ block: 'nearest' });
+    const pr = ST.prFlags(S.workoutById(wid), e, exType(e.exerciseId)).get(sid);
+    if (pr) toast(`🏆 Новий рекорд: ${pr.join(', ')}!`, 3000);
   },
   'edit-set'(f, fd) {
     const { wid, eid, sid } = f.dataset;
@@ -864,6 +1105,14 @@ document.addEventListener('click', (e) => {
   if (!t || t.disabled) return;
   const fn = actions[t.dataset.action];
   if (fn) { e.preventDefault(); fn({ ...t.dataset }); }
+});
+
+document.addEventListener('change', (e) => {
+  if (e.target.dataset?.change === 'stats-ex') {
+    state.stats.exId = e.target.value;
+    state.stats.metric = null;
+    render();
+  }
 });
 
 document.addEventListener('submit', (e) => {
