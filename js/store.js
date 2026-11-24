@@ -4,7 +4,8 @@
 //   version, muscleGroups: [{id, name}],
 //   exercises: [{id, name, type, muscleGroupIds, archived, createdAt}],
 //   workouts: [{id, startedAt, finishedAt, note, entries: [{id, exerciseId, sets: [{id, weight, reps, distance, duration, at}]}]}],
-//   bodyWeights: [], templates: [], settings: {lastBackupAt}
+//   templates: [{id, name, exerciseIds}],
+//   bodyWeights: [], settings: {lastBackupAt}
 // }
 // weight — кг, distance — км, duration — секунди. Невикористані поля = null.
 
@@ -120,7 +121,13 @@ function normalize(d) {
           })),
       })),
     bodyWeights: Array.isArray(d.bodyWeights) ? d.bodyWeights : [],
-    templates: Array.isArray(d.templates) ? d.templates : [],
+    templates: (Array.isArray(d.templates) ? d.templates : [])
+      .filter((t) => t && t.id && t.name)
+      .map((t) => ({
+        id: String(t.id),
+        name: String(t.name),
+        exerciseIds: Array.isArray(t.exerciseIds) ? t.exerciseIds.map(String) : [],
+      })),
     settings: { lastBackupAt: isDate(d.settings?.lastBackupAt) ? d.settings.lastBackupAt : null },
   };
 }
@@ -167,5 +174,21 @@ export function exerciseUsage() {
   return m;
 }
 
-export const countSets = (workouts = data.workouts) =>
+export const templateById = (id) => data.templates.find((t) => t.id === id);
+
+/** Останнє виконання вправи ДО цього тренування: {w, e} або null */
+export function lastPerformance(exerciseId, workout) {
+  const before = Date.parse(workout.startedAt);
+  let best = null, bestT = -Infinity;
+  for (const w of data.workouts) {
+    if (w.id === workout.id) continue;
+    const t = Date.parse(w.startedAt);
+    if (t >= before || t <= bestT) continue;
+    const e = w.entries.find((e) => e.exerciseId === exerciseId && e.sets.length);
+    if (e) { best = { w, e }; bestT = t; }
+  }
+  return best;
+}
+
+export const countSets =(workouts = data.workouts) =>
   workouts.reduce((a, w) => a + w.entries.reduce((b, e) => b + e.sets.length, 0), 0);

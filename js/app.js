@@ -58,6 +58,17 @@ function fmtSet(type, s) {
   return '';
 }
 
+/** Короткий запис для рядка «Минулого разу»: 60×10, 62,5×8 */
+function fmtSetShort(type, s) {
+  switch (type) {
+    case 'strength': return `${fmtIn(s.weight)}×${s.reps}`;
+    case 'bodyweight': return s.weight ? `${s.reps} (+${fmtIn(s.weight)})` : `${s.reps}`;
+    case 'cardio': return [s.distance ? `${fmtIn(s.distance)} км` : '', s.duration ? fmtDuration(s.duration) : ''].filter(Boolean).join(' ');
+    case 'time': return fmtDuration(s.duration);
+  }
+  return '';
+}
+
 function entrySummary(type, sets) {
   if (!sets.length) return '';
   const sum = (f) => sets.reduce((a, s) => a + (f(s) || 0), 0);
@@ -163,7 +174,25 @@ function viewWorkoutTab() {
       <p class="muted small">Дата і час запишуться автоматично</p>
     </div>
     ${!S.get().exercises.length ? `<div class="card tip"><b>Порада:</b> вправи можна створювати прямо під час тренування — натисни «Додати вправу» і впиши назву. Або заздалегідь у вкладці «Вправи».</div>` : ''}
+    ${templatesSection()}
     ${last ? `<h2 class="section">Останнє тренування</h2>${workoutCard(last)}` : ''}`;
+}
+
+function templatesSection() {
+  const tpls = S.get().templates.slice().sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+  const cards = tpls.map((t) => {
+    const names = t.exerciseIds.map((id) => S.exerciseById(id)).filter((x) => x && !x.archived).map((x) => esc(x.name));
+    return `<div class="card tcard">
+        <button class="tcard-main" data-action="start-template" ${da({ id: t.id })}>
+          <div class="strong">▶ ${esc(t.name)}</div>
+          <div class="muted small">${names.join(' · ') || 'Немає вправ'}</div>
+        </button>
+        <button class="icon" data-action="edit-template" ${da({ id: t.id })} aria-label="Редагувати шаблон">✎</button>
+      </div>`;
+  }).join('');
+  return `<h2 class="section">Шаблони</h2>
+    ${cards || '<p class="muted small tpl-hint">Шаблон — це готовий набір вправ, напр. «День ніг». Почни тренування з нього одним натиском.</p>'}
+    <button class="btn block" data-action="new-template">+ Новий шаблон</button>`;
 }
 
 function workoutEditor(w, isActive) {
@@ -179,6 +208,7 @@ function workoutEditor(w, isActive) {
     </div>
     ${entries || '<p class="empty">Додай першу вправу 👇</p>'}
     <button class="btn block" data-action="add-exercise" ${da({ wid: w.id })}>+ Додати вправу</button>
+    ${w.entries.length ? `<button class="btn ghost block" data-action="save-as-template" ${da({ wid: w.id })}>Зберегти як шаблон</button>` : ''}
     ${isActive
       ? `<button class="btn primary block" data-action="finish-workout" ${da({ wid: w.id })}>Завершити тренування</button>`
       : `<button class="btn danger-ghost block" data-action="delete-workout" ${da({ wid: w.id })}>Видалити тренування</button>`}`;
@@ -191,15 +221,19 @@ function entryCard(w, e) {
   const sets = e.sets.map((s, j) =>
     `<li><button class="set" data-action="edit-set" ${da({ ...ids, sid: s.id })}><span class="n">${j + 1}</span><span>${fmtSet(type, s)}</span></button></li>`).join('');
   const summary = entrySummary(type, e.sets);
+  const prev = S.lastPerformance(e.exerciseId, w);
+  // Підказка у полях: останній підхід цього тренування, а якщо ще немає — перший підхід минулого разу.
+  const prefill = e.sets[e.sets.length - 1] || prev?.e.sets[0];
   return `
     <section class="card entry" ${da({ eid: e.id })}>
       <header class="entry-head">
         <div><h3>${esc(ex?.name || 'Видалена вправа')}</h3><span class="muted small">${S.TYPES[type].label}</span></div>
         <button class="icon" data-action="entry-menu" ${da(ids)} aria-label="Дії з вправою">⋯</button>
       </header>
+      ${prev ? `<div class="last"><span class="muted">Минулого разу · ${fmtDateShort(prev.w.startedAt)}</span><br>${prev.e.sets.map((s) => fmtSetShort(type, s)).join(', ')}</div>` : ''}
       ${sets ? `<ol class="sets">${sets}</ol>` : ''}
       <form class="add-set" data-form="add-set" ${da(ids)}>
-        ${setFields(type, e.sets[e.sets.length - 1])}
+        ${setFields(type, prefill)}
         <button class="btn primary add" type="submit" aria-label="Додати підхід">+</button>
       </form>
       ${summary ? `<div class="summary">${summary}</div>` : ''}
@@ -322,10 +356,11 @@ function fillStorageStatus() {
 // Модалки й сповіщення
 // ====================================================================
 
-function openModal(html) {
+function openModal(html, keepScroll = false) {
+  const top = modal.scrollTop;
   modalBody.innerHTML = html;
   if (!modal.open) modal.showModal();
-  modalBody.scrollTop = 0;
+  modal.scrollTop = keepScroll ? top : 0;
 }
 function closeModal() { if (modal.open) modal.close(); }
 modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
@@ -458,6 +493,52 @@ function openGroupForm(id = '') {
     </form>`);
 }
 
+// ---------- Редактор шаблону ----------
+// Чернетка живе тут, поки вікно відкрите; у дані потрапляє лише після «Зберегти».
+
+let tplDraft = null, tplQuery = '';
+
+function openTemplateEditor(tpl, exerciseIds = []) {
+  tplDraft = tpl
+    ? { id: tpl.id, name: tpl.name, exerciseIds: [...tpl.exerciseIds] }
+    : { id: '', name: '', exerciseIds: [...new Set(exerciseIds)] };
+  tplQuery = '';
+  renderTemplateEditor(false);
+}
+
+function tplAvailable() {
+  const q = tplQuery.trim().toLowerCase();
+  const chosen = new Set(tplDraft.exerciseIds);
+  const list = S.get().exercises
+    .filter((x) => !x.archived && !chosen.has(x.id) && (!q || x.name.toLowerCase().includes(q)))
+    .sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+  if (!S.get().exercises.length) return '<p class="muted small">Спершу створи вправи у вкладці «Вправи».</p>';
+  if (!list.length) return `<p class="muted small">${q ? 'Нічого не знайдено.' : 'Усі вправи вже додано.'}</p>`;
+  return list.map((x) => `<button type="button" class="pick" data-action="tpl-add" ${da({ xid: x.id })}>
+      <span>${esc(x.name)}</span><span class="muted small">+ додати</span></button>`).join('');
+}
+
+function renderTemplateEditor(keepScroll = true) {
+  const ids = tplDraft.exerciseIds;
+  const chosen = ids.map((xid, i) => `
+      <li><span class="n">${i + 1}</span><span class="grow">${esc(S.exerciseById(xid)?.name || 'Видалена вправа')}</span>
+        <button type="button" class="icon" data-action="tpl-move" ${da({ i, dir: -1 })} ${i === 0 ? 'disabled' : ''} aria-label="Вище">↑</button>
+        <button type="button" class="icon" data-action="tpl-move" ${da({ i, dir: 1 })} ${i === ids.length - 1 ? 'disabled' : ''} aria-label="Нижче">↓</button>
+        <button type="button" class="icon" data-action="tpl-remove" ${da({ i })} aria-label="Прибрати">✕</button></li>`).join('');
+  openModal(`<form data-form="template">
+      <h2>${tplDraft.id ? 'Редагувати шаблон' : 'Новий шаблон'}</h2>
+      <label class="fld"><span>Назва</span><input id="tpl-name" name="name" value="${esc(tplDraft.name)}" maxlength="40" placeholder="Напр. День ніг" autocomplete="off"></label>
+      <div class="fld"><span>Вправи в шаблоні (у порядку виконання)</span>
+        ${chosen ? `<ol class="tlist">${chosen}</ol>` : '<p class="muted small">Ще немає — обери нижче.</p>'}</div>
+      <div class="fld"><span>Додати вправу</span>
+        <input id="tpl-search" type="search" placeholder="Пошук" autocomplete="off" value="${esc(tplQuery)}">
+        <div id="tpl-avail">${tplAvailable()}</div></div>
+      <button class="btn primary block">Зберегти шаблон</button>
+      ${tplDraft.id ? '<button type="button" class="btn danger-ghost block" data-action="tpl-delete">Видалити шаблон</button>' : ''}
+      <div class="row">${cancelBtn()}</div>
+    </form>`, keepScroll);
+}
+
 function focusEntry(eid) {
   const card = document.querySelector(`.entry[data-eid="${CSS.escape(eid)}"]`);
   if (!card) return;
@@ -572,6 +653,7 @@ const actions = {
     S.mutate((d) => {
       d.exercises = d.exercises.filter((e) => e.id !== id);
       for (const w of d.workouts) w.entries = w.entries.filter((e) => e.exerciseId !== id);
+      for (const t of d.templates) t.exerciseIds = t.exerciseIds.filter((xid) => xid !== id);
     });
     closeModal(); render(); toast('Вправу видалено');
   },
@@ -587,6 +669,38 @@ const actions = {
       for (const x of d.exercises) x.muscleGroupIds = x.muscleGroupIds.filter((gid) => gid !== id);
     });
     render();
+  },
+
+  'new-template'() { openTemplateEditor(null); },
+  'edit-template'({ id }) { const t = S.templateById(id); if (t) openTemplateEditor(t); },
+  'save-as-template'({ wid }) {
+    const w = S.workoutById(wid);
+    if (w) openTemplateEditor(null, w.entries.map((e) => e.exerciseId).filter((id) => S.exerciseById(id)));
+  },
+  'tpl-add'({ xid }) { tplDraft.exerciseIds.push(xid); renderTemplateEditor(); },
+  'tpl-remove'({ i }) { tplDraft.exerciseIds.splice(Number(i), 1); renderTemplateEditor(); },
+  'tpl-move'({ i, dir }) {
+    const a = tplDraft.exerciseIds, x = Number(i), y = x + Number(dir);
+    if (y < 0 || y >= a.length) return;
+    [a[x], a[y]] = [a[y], a[x]];
+    renderTemplateEditor();
+  },
+  'tpl-delete'() {
+    const t = S.templateById(tplDraft.id);
+    if (!t || !confirm(`Видалити шаблон «${t.name}»? Тренування, вже записані з нього, залишаться.`)) return;
+    S.mutate((d) => { d.templates = d.templates.filter((x) => x.id !== t.id); });
+    closeModal(); render(); toast('Шаблон видалено');
+  },
+  'start-template'({ id }) {
+    const t = S.templateById(id);
+    if (!t || S.activeWorkout()) return;
+    const entries = t.exerciseIds
+      .filter((xid) => { const x = S.exerciseById(xid); return x && !x.archived; })
+      .map((xid) => ({ id: S.uid(), exerciseId: xid, sets: [] }));
+    S.mutate((d) => d.workouts.push({ id: S.uid(), startedAt: nowIso(), finishedAt: null, note: '', entries }));
+    render();
+    window.scrollTo(0, 0);
+    toast(`Почато: ${t.name}`);
   },
 
   export: doExport,
@@ -666,6 +780,18 @@ const forms = {
     render();
     if (newEid) focusEntry(newEid);
     else toast(id ? 'Збережено' : 'Вправу створено');
+  },
+  template(f, fd) {
+    const name = String(fd.get('name') || '').trim().replace(/\s+/g, ' ');
+    if (!name) return toast('Впиши назву шаблону');
+    if (!tplDraft.exerciseIds.length) return toast('Додай хоча б одну вправу');
+    if (S.get().templates.some((t) => t.id !== tplDraft.id && t.name.toLowerCase() === name.toLowerCase())) return toast('Шаблон з такою назвою вже є');
+    const isNew = !tplDraft.id;
+    S.mutate((d) => {
+      if (isNew) d.templates.push({ id: S.uid(), name, exerciseIds: [...tplDraft.exerciseIds] });
+      else Object.assign(S.templateById(tplDraft.id), { name, exerciseIds: [...tplDraft.exerciseIds] });
+    });
+    closeModal(); render(); toast(isNew ? 'Шаблон створено' : 'Шаблон збережено');
   },
   group(f, fd) {
     const name = String(fd.get('name') || '').trim().replace(/\s+/g, ' ');
@@ -749,8 +875,11 @@ document.addEventListener('submit', (e) => {
 
 modal.addEventListener('input', (e) => {
   if (e.target.id === 'pick-search') $('#pick-list').innerHTML = pickList(e.target.value, e.target.dataset.wid);
+  if (e.target.id === 'tpl-name') tplDraft.name = e.target.value;
+  if (e.target.id === 'tpl-search') { tplQuery = e.target.value; $('#tpl-avail').innerHTML = tplAvailable(); }
 });
 modal.addEventListener('keydown', (e) => {
+  if (e.target.id === 'tpl-search' && e.key === 'Enter') { e.preventDefault(); return; }
   // Enter у пошуку: якщо знайдено рівно одну вправу — додати її, інакше створити нову.
   if (e.target.id !== 'pick-search' || e.key !== 'Enter') return;
   e.preventDefault();
